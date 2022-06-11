@@ -1,0 +1,21 @@
+# Compiled XDP object files and ll files.
+*.o
+*.ll
+
+# Compiled userspace programs
+stats_user
+pinning_user
+xdpfw_user
+tcbit_user
+sampler_user
+
+# Compiled libbpf objects and includes
+common/libbpf
+
+# IDE/Editor specific directories/files
+.vscode/
+
+# lab setup files
+packer_cache/
+*.iso
+xdp-test-lab-virtualbox/

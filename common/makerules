@@ -1,0 +1,89 @@
+# 设置基础工具链 // ?= 如果没有被赋值过就赋予等号后面的值 
+CC ?= gcc
+LLC ?= llc
+CLANG ?= clang
+
+# 定义一个函数
+# 递归拿出$1中所有的文件并通过$2进行filter
+rwildcard=$(foreach d,$(wildcard $1*),$(call rwildcard,$d/,$2) $(filter $(subst *,%,$2),$d))
+
+# MAKEFILE_LIST是个make中预定义的列表变量, 在每次make读入一个makefile文件时, 都把它添加到最后一项
+# 当前makefile文件的目录
+COMMON_DIR = $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+# 调用rwildcard函数
+COMMON_HEADERS = $(call rwildcard, $(COMMON_DIR)include, *.h)
+
+# 在包含这个文件的makefile文件中定义过
+# 从KERNEL_TARGET中过滤出所有.o文件
+KERNEL_TARGET_OBJECT = ${KERNEL_TARGET:=.o}
+KERNEL_TARGET_LLC_OBJECT = ${KERNEL_TARGET:=.ll}
+# 如果没定义过这些依赖，就是不需要
+KERNEL_TARGET_DEPS ?=
+
+USER_TARGET_DEPS ?=
+
+# libbpf相关
+LIBBPF_SRC_DIR = $(COMMON_DIR)../libbpf/src
+LIBBPF_OUTPUT_DIR = $(COMMON_DIR)/libbpf
+LIBBPF_TARGET = $(LIBBPF_OUTPUT_DIR)/libbpf.a
+
+# 编译参数 头文件目录
+CFLAGS ?=
+CFLAGS += "-I$(COMMON_DIR)/include/"
+CFLAGS += "-I$(LIBBPF_OUTPUT_DIR)/usr/include/"
+CFLAGS += "-I/usr/include/x86_64-linux-gnu"
+
+# 构建用户态和内核态两个程序
+.PHONY: all
+all: $(KERNEL_TARGET_OBJECT) $(USER_TARGET)
+
+# 构建libbpf
+# make install_headers进行安装libbpf的头文件
+$(LIBBPF_TARGET):
+	@(if [ ! -d $(LIBBPF_SRC_DIR) ]; then \
+		echo "Missing libbpf submodule please run 'git submodule update --init --recursive' at the root of this repo."; \
+		exit 1; \
+	fi)
+	cd $(LIBBPF_SRC_DIR) \
+	&& mkdir -p $(LIBBPF_OUTPUT_DIR) \
+	&& OBJDIR=$(LIBBPF_OUTPUT_DIR) $(MAKE) all \
+	&& DESTDIR=$(LIBBPF_OUTPUT_DIR) $(MAKE) install_headers
+
+# 构建用户态程序 需要依赖USER_TARGET_DEPS LIBBPF_TARGET COMMON_HEADERS
+# makefile 静态模式——$(objects): %.o: %.c
+# $@ 表示目标文件 $< 第一个依赖的文件名
+# -lz 表示链接库为压缩库
+$(USER_TARGET): %: %.c $(USER_TARGET_DEPS) $(LIBBPF_TARGET) $(COMMON_HEADERS)
+	$(CC) \
+		$(CFLAGS) \
+		-L$(LIBBPF_OUTPUT_DIR) \
+		-Wall \
+		-Wno-unused-variable \
+		-Wno-unused-function \
+		-O2 -g -o $@ $< \
+		-lz	\
+		-l:libbpf.a -lbpf -lelf
+
+# 构建内核态程序 需要依赖KERNEL_TARGET_DEPS COMMON_HEADERS
+# -S 汇编
+# -emit-llvm 对汇编程序和目标文件使用 LLVM 表示
+# -target bpf -march=bpf -filetype=obj
+$(KERNEL_TARGET_OBJECT): %.o: %.c $(KERNEL_TARGET_DEPS) $(COMMON_HEADERS)
+	$(CLANG) -S \
+	    -target bpf \
+	    -D __BPF_TRACING__ \
+	    $(CFLAGS) \
+	    -Wall \
+		-Wno-compare-distinct-pointer-types \
+	    -O2 -emit-llvm -c -g -o $(KERNEL_TARGET_LLC_OBJECT) $<
+	$(LLC) -march=bpf -filetype=obj -o $@ $(KERNEL_TARGET_LLC_OBJECT)
+
+# make clean
+.PHONY: clean
+clean:
+	rm -f *.ll *.o $(USER_TARGET)
+
+# make clean-libbpf 删除LIBBPF_OUTPUT_DIR目录
+.PHONY: clean-libbpf
+clean-libbpf:
+	rm -rf $(LIBBPF_OUTPUT_DIR)
